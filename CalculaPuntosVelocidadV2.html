@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generador de ruta GPS por carretera</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Roboto', sans-serif;
+      background-color: #f2f2f2;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h2 { margin-top: 20px; color: #2c3e50; }
+
+    #controls {
+      margin: 10px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    input, button {
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      font-size: 14px;
+    }
+
+    #map {
+      height: 70vh;
+      width: 95%;
+      max-width: 1400px;
+      margin: 20px 0;
+      border: 2px solid #3498db;
+      border-radius: 8px;
+    }
+
+    .saveBtn {
+      padding: 12px 24px;
+      background-color: #3498db;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      margin-bottom: 15px;
+      transition: background-color 0.3s ease;
+    }
+
+    .saveBtn:hover { background-color: #2980b9; }
+  </style>
+</head>
+<body>
+
+  <h2>Generador de ruta GPS (por carretera)</h2>
+
+  <div id="controls">
+    <label>Inicio (lat,lon):</label>
+    <input id="start" placeholder="40.4168,-3.7038" readonly>
+
+    <label>Destino (lat,lon):</label>
+    <input id="end" placeholder="40.4379,-3.6793" readonly>
+
+    <label>Velocidad (km/h):</label>
+    <input type="number" id="speed" value="30" min="1">
+
+    <button id="routeBtn">Trazar ruta</button>
+  </div>
+
+  <div id="map"></div>
+
+  <button class="saveBtn" id="saveBtn">Guardar ruta simulada en CSV</button>
+  <button class="saveBtn" id="saveReversedBtn">Guardar ruta invertida en CSV</button>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script>
+
+    // === INICIALIZACIÓN DEL MAPA ===
+    const map = L.map('map').setView([40.4168, -3.7038], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let routeLayer = null;
+    let currentRoute = [];
+
+
+    // === CLIC DERECHO: COPIAR COORDENADAS ===
+    map.on('contextmenu', function(event) {
+      const lat = event.latlng.lat.toFixed(6);
+      const lon = event.latlng.lng.toFixed(6);
+
+      // Si el campo de inicio está vacío, colocamos las coordenadas allí
+      if (!document.getElementById("start").value) {
+        document.getElementById("start").value = `${lat},${lon}`;
+      } else if (!document.getElementById("end").value) {
+        // Si el campo de destino está vacío, colocamos las coordenadas allí
+        document.getElementById("end").value = `${lat},${lon}`;
+      }
+
+      // Mostrar popup con las coordenadas
+      L.popup()
+        .setLatLng(event.latlng)
+        .setContent(`📍 <b>${lat}, ${lon}</b>`)
+        .openOn(map);
+    });
+
+
+    // === DISTANCIA HAVERSINE ===
+    function haversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(lat1 * Math.PI / 180) *
+                Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) ** 2;
+      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+    }
+
+
+    // === GENERAR PUNTOS GPS ===
+    function generateGPSPoints(route, speedKmh) {
+      const speedMs = speedKmh * 1000 / 3600;
+      let gps = [];
+      let time = 0;
+      const dt = 0.1;
+
+      for (let i = 0; i < route.length - 1; i++) {
+        const [lat1, lon1] = route[i];
+        const [lat2, lon2] = route[i + 1];
+
+        const distM = haversineDistance(lat1, lon1, lat2, lon2) * 1000;
+        const totalT = distM / speedMs;
+        const steps = Math.max(1, Math.floor(totalT / dt));
+
+        for (let j = 0; j <= steps; j++) {
+          const f = j / steps;
+          const lat = lat1 + (lat2 - lat1) * f;
+          const lon = lon1 + (lon2 - lon1) * f;
+
+          gps.push([time.toFixed(1), lat, lon, 99.999]);
+          time += dt;
+        }
+      }
+      return gps;
+    }
+
+
+    // === OBTENER RUTA DESDE OSRM ===
+    async function getRouteFromOSRM(latA, lonA, latB, lonB) {
+      const url =
+        `https://router.project-osrm.org/route/v1/driving/${lonA},${latA};${lonB},${latB}?overview=full&geometries=geojson`;
+
+      try {
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!data.routes || !data.routes.length) {
+          throw new Error("No se encontró ruta");
+        }
+
+        // Verificamos que la geometría esté correctamente definida
+        console.log("Respuesta de OSRM:", data);
+
+        // La geometría de la ruta debe estar en el formato adecuado (array de coordenadas)
+        const route = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+        return route;
+
+      } catch (error) {
+        alert("Error al obtener la ruta desde el servidor: " + error.message);
+        return [];
+      }
+    }
+
+
+    // === BOTÓN TRAZAR RUTA ===
+    document.getElementById("routeBtn").addEventListener("click", async () => {
+      try {
+        const [latA, lonA] = document.getElementById("start").value.split(",").map(Number);
+        const [latB, lonB] = document.getElementById("end").value.split(",").map(Number);
+
+        const route = await getRouteFromOSRM(latA, lonA, latB, lonB);
+
+        if (route.length === 0) return;
+
+        if (routeLayer) map.removeLayer(routeLayer);
+
+        routeLayer = L.polyline(route, { color: "blue" }).addTo(map);
+        map.fitBounds(routeLayer.getBounds());
+        currentRoute = route;
+
+        alert(`Ruta trazada con ${route.length} puntos de carretera.`);
+      } catch (e) {
+        alert("Error: " + e.message);
+      }
+    });
+
+
+    // === FUNCIÓN GUARDAR CSV ===
+    function saveCSV(route, speed, reversed = false) {
+      const sim = generateGPSPoints(route, speed);
+
+      const csv = sim.map(p =>
+        `${p[0]}, ${p[1].toFixed(14)}, ${p[2].toFixed(14)}, ${p[3]}`
+      ).join("\n");
+
+      const blob = new Blob([csv], { type: "text/csv" });
+      const link = document.createElement("a");
+
+      const suffix = reversed ? "_invertida" : "";
+      link.download = `ruta_${speed}kmh${suffix}.csv`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+    }
+
+
+    // === BOTÓN GUARDAR NORMAL ===
+    document.getElementById("saveBtn").addEventListener("click", () => {
+      if (currentRoute.length === 0)
+        return alert("Primero traza una ruta.");
+
+      const speed = Number(document.getElementById("speed").value);
+      saveCSV(currentRoute, speed, false);
+    });
+
+
+    // === BOTÓN GUARDAR RUTA INVERTIDA ===
+    document.getElementById("saveReversedBtn").addEventListener("click", () => {
+      if (currentRoute.length === 0)
+        return alert("Primero traza una ruta.");
+
+      const speed = Number(document.getElementById("speed").value);
+
+      const reversedRoute = [...currentRoute].reverse();
+
+      saveCSV(reversedRoute, speed, true);
+    });
+
+  </script>
+
+</body>
+</html>
+

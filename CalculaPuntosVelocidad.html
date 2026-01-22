@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generador de ruta GPS con velocidad</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Roboto', sans-serif;
+      background-color: #f2f2f2;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h2 {
+      text-align: center;
+      margin-top: 20px;
+      color: #2c3e50;
+    }
+
+    #controls {
+      margin: 10px 0;
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    #map {
+      height: 70vh;
+      width: 95%;
+      max-width: 1400px;
+      margin: 20px 0;
+      border: 2px solid #3498db;
+      border-radius: 8px;
+    }
+
+    input[type="number"] {
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 14px;
+      width: 80px;
+    }
+
+    #saveBtn {
+      padding: 12px 24px;
+      background-color: #3498db;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      margin-bottom: 40px;
+      transition: background-color 0.3s ease;
+    }
+
+    #saveBtn:hover {
+      background-color: #2980b9;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>Generador de ruta GPS con velocidad</h2>
+
+  <div id="controls">
+    <label for="speed">Velocidad (km/h):</label>
+    <input type="number" id="speed" value="30" min="1" step="1">
+    <label for="interval">Intervalo (s):</label>
+    <input type="number" id="interval" value="1" min="0.1" step="0.1">
+  </div>
+
+  <div id="map"></div>
+  <button id="saveBtn">Guardar ruta simulada en CSV</button>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([40.4168, -3.7038], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let allRoutes = [];
+    let currentRoute = [];
+    let polylines = [];
+
+    map.on('contextmenu', function(event) {
+      event.originalEvent.preventDefault();
+      const lat = event.latlng.lat;
+      const lon = event.latlng.lng;
+      currentRoute.push([lat, lon]);
+
+      if (polylines.length < allRoutes.length + 1) {
+        const polyline = L.polyline(currentRoute, { color: 'blue' }).addTo(map);
+        polylines.push(polyline);
+      } else {
+        polylines[polylines.length - 1].setLatLngs(currentRoute);
+      }
+
+      L.marker([lat, lon]).addTo(map)
+        .bindPopup(`<b>Lat:</b> ${lat.toFixed(6)}<br><b>Lon:</b> ${lon.toFixed(6)}`);
+    });
+
+    document.addEventListener('keydown', function(event) {
+      if (event.code === 'Space') {
+        if (currentRoute.length > 0) {
+          allRoutes.push(currentRoute);
+          currentRoute = [];
+        }
+      }
+    });
+
+    function haversineDistance(lat1, lon1, lat2, lon2) {
+      const R = 6371;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 +
+        Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLon / 2) ** 2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
+    }
+
+    function generateGPSPoints(route, speedKmh, intervalSec) {
+      const speedMs = (speedKmh * 1000) / 3600;
+      let gpsPoints = [];
+      let currentTime = 0;
+
+      for (let i = 0; i < route.length - 1; i++) {
+        const [lat1, lon1] = route[i];
+        const [lat2, lon2] = route[i + 1];
+        const distanceKm = haversineDistance(lat1, lon1, lat2, lon2);
+        const distanceM = distanceKm * 1000;
+
+        const totalTime = distanceM / speedMs;
+        const numSteps = Math.max(1, Math.floor(totalTime / intervalSec));
+
+        for (let j = 0; j <= numSteps; j++) {
+          const fraction = j / numSteps;
+          const lat = lat1 + (lat2 - lat1) * fraction;
+          const lon = lon1 + (lon2 - lon1) * fraction;
+          gpsPoints.push([currentTime.toFixed(1), lat, lon, 99.999]);
+          currentTime += intervalSec;
+        }
+      }
+      return gpsPoints;
+    }
+
+    document.getElementById('saveBtn').addEventListener('click', function() {
+      if (currentRoute.length > 0) {
+        allRoutes.push(currentRoute);
+        currentRoute = [];
+      }
+
+      if (allRoutes.length === 0) {
+        alert("No hay puntos para guardar.");
+        return;
+      }
+
+      const speed = parseFloat(document.getElementById('speed').value);
+      const interval = parseFloat(document.getElementById('interval').value);
+      let fullRouteData = [];
+
+      allRoutes.forEach(route => {
+        const simulatedPoints = generateGPSPoints(route, speed, interval);
+        fullRouteData = fullRouteData.concat(simulatedPoints);
+      });
+
+      const totalKm = allRoutes.reduce((sum, route) => {
+        for (let i = 0; i < route.length - 1; i++) {
+          sum += haversineDistance(route[i][0], route[i][1], route[i + 1][0], route[i + 1][1]);
+        }
+        return sum;
+      }, 0);
+
+      alert(`Distancia total: ${totalKm.toFixed(3)} km\nVelocidad: ${speed} km/h`);
+
+      const csvContent = fullRouteData.map(p => `${p[0]}, ${p[1].toFixed(12)}, ${p[2].toFixed(12)}, ${p[3]}`).join("\n");
+
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `ruta_simulada_${speed}kmh.csv`;
+      link.click();
+    });
+  </script>
+</body>
+</html>
+
